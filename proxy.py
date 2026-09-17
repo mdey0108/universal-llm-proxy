@@ -96,7 +96,23 @@ def log_proxy(direction: str, msg: str):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
-def load_config() -> dict:
+# Claude Desktop UI is hardcoded to only accept and display these specific IDs.
+# We map configured models to these standard IDs so they appear in the app's dropdown.
+STANDARD_CLAUDE_IDS = [
+    "claude-3-7-sonnet-20250219",
+    "claude-3-5-sonnet-20241022",
+    "claude-3-5-haiku-20241022",
+    "claude-3-opus-20240229",
+    "claude-sonnet-4-20250514",
+    "claude-opus-4-20250918",
+    "claude-3-sonnet-20240229",
+    "claude-3-haiku-20240307",
+    "claude-2.1",
+    "claude-2.0",
+    "claude-instant-1.2"
+]
+
+def load_config() -> tuple[dict, dict, str]:
     """Load configuration from config.yaml."""
     if not CONFIG_PATH.exists():
         log_error(f"Config file not found: {CONFIG_PATH}")
@@ -104,64 +120,84 @@ def load_config() -> dict:
         sys.exit(1)
 
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+        raw_config = yaml.safe_load(f) or {}
 
-    # Validate required fields
-    required = {
-        "server.host": config.get("server", {}).get("host"),
-        "server.port": config.get("server", {}).get("port"),
-        "server.api_key": config.get("server", {}).get("api_key"),
-        "provider.type": config.get("provider", {}).get("type"),
-        "provider.base_url": config.get("provider", {}).get("base_url"),
-        "provider.api_key": config.get("provider", {}).get("api_key"),
-        "provider.model": config.get("provider", {}).get("model"),
-    }
-    missing = [k for k, v in required.items() if not v]
-    if missing:
-        log_error(f"Missing config fields: {', '.join(missing)}")
+    server = raw_config.get("server", {})
+    if not server.get("host") or not server.get("port") or not server.get("api_key"):
+        log_error("Missing server configuration (host, port, api_key) in config.yaml")
         sys.exit(1)
 
-    return config
+    model_registry = {}
+    models_list = raw_config.get("models", [])
+
+    # Backward compatibility: if user has single 'provider:' instead of 'models:'
+    if not models_list and "provider" in raw_config:
+        p = raw_config["provider"]
+        m_id = p.get("model", "default")
+        models_list = [{
+            "id": m_id,
+            "display_name": m_id,
+            "type": p.get("type", "openai"),
+            "base_url": p.get("base_url"),
+            "api_key": p.get("api_key"),
+            "model": p.get("model"),
+        }]
+
+    if not models_list:
+        log_error("No models configured under 'models:' or 'provider:' in config.yaml")
+        sys.exit(1)
+
+    for m in models_list:
+        m_id = str(m.get("id", "")).strip()
+        if not m_id:
+            continue
+        
+        original_model = m.get("model", m_id)
+        raw_name = m.get("display_name", original_model)
+        
+        if "Claude" not in raw_name:
+            disp_name = f"Claude ({raw_name})"
+        else:
+            disp_name = raw_name
+
+        model_registry[m_id] = {
+            "id": m_id,
+            "display_name": disp_name,
+            "type": m.get("type", "openai"),
+            "base_url": m.get("base_url", ""),
+            "api_key": m.get("api_key", ""),
+            "model": original_model,
+        }
+
+    parsed_models = list(model_registry.values())
+    
+    # Create the mapping for standard IDs so Claude Desktop works.
+    # We only map as many standard IDs as there are custom models.
+    for idx, target in enumerate(parsed_models):
+        if idx >= len(STANDARD_CLAUDE_IDS):
+            log_warn(f"Cannot map '{target['display_name']}' to UI. Max {len(STANDARD_CLAUDE_IDS)} UI models supported.")
+            break
+            
+        cid = STANDARD_CLAUDE_IDS[idx]
+        if cid not in model_registry:
+            model_registry[cid] = {
+                "id": cid,
+                "display_name": target["display_name"],
+                "type": target["type"],
+                "base_url": target["base_url"],
+                "api_key": target["api_key"],
+                "model": target["model"],
+            }
+
+    default_model_id = raw_config.get("default_model")
+    if not default_model_id or default_model_id not in model_registry:
+        default_model_id = list(model_registry.keys())[0]
+
+    return server, model_registry, default_model_id
 
 
-config = load_config()
-SERVER = config["server"]
-PROVIDER = config["provider"]
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Claude Model Definitions (what Claude Desktop sees)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CLAUDE_MODELS = [
-    {
-        "id": "claude-sonnet-4-20250514",
-        "display_name": "Claude Sonnet 4",
-        "created_at": "2025-05-14T00:00:00Z",
-    },
-    {
-        "id": "claude-opus-4-20250918",
-        "display_name": "Claude Opus 4",
-        "created_at": "2025-09-18T00:00:00Z",
-    },
-    {
-        "id": "claude-3-5-sonnet-20241022",
-        "display_name": "Claude 3.5 Sonnet",
-        "created_at": "2024-10-22T00:00:00Z",
-    },
-    {
-        "id": "claude-3-opus-20240229",
-        "display_name": "Claude 3 Opus",
-        "created_at": "2024-02-29T00:00:00Z",
-    },
-    {
-        "id": "claude-3-5-haiku-20241022",
-        "display_name": "Claude 3.5 Haiku",
-        "created_at": "2024-10-22T00:00:00Z",
-    },
-]
-
-# The model name we report back in responses
-DEFAULT_RESPONSE_MODEL = "claude-sonnet-4-20250514"
+SERVER, MODEL_REGISTRY, DEFAULT_MODEL_ID = load_config()
+DEFAULT_RESPONSE_MODEL = DEFAULT_MODEL_ID
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -187,7 +223,7 @@ def _extract_text_from_content(content) -> str:
     return str(content)
 
 
-def anthropic_to_openai(body: dict) -> dict:
+def anthropic_to_openai(body: dict, target_model: str) -> dict:
     """
     Convert an Anthropic Messages API request to an OpenAI Chat Completions request.
 
@@ -329,7 +365,7 @@ def anthropic_to_openai(body: dict) -> dict:
 
     # Build OpenAI request
     openai_body = {
-        "model": PROVIDER["model"],
+        "model": target_model,
         "messages": openai_messages,
     }
 
@@ -445,7 +481,7 @@ def openai_to_anthropic(openai_response: dict, requested_model: str) -> dict:
         "type": "message",
         "role": "assistant",
         "content": content_blocks,
-        "model": requested_model if requested_model in [m["id"] for m in CLAUDE_MODELS] else DEFAULT_RESPONSE_MODEL,
+        "model": requested_model if requested_model in MODEL_REGISTRY else DEFAULT_RESPONSE_MODEL,
         "stop_reason": _map_finish_reason(choice.get("finish_reason")),
         "stop_sequence": None,
         "usage": {
@@ -702,19 +738,24 @@ def verify_auth(request: Request) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GET /v1/models — Return fake Claude models
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /v1/models — Return configured models to Claude Desktop
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/v1/models")
 async def list_models(request: Request):
-    """Return a list of Claude models so Claude Desktop shows the right options."""
+    """Return a list of configured models so Claude Desktop shows them in the dropdown UI."""
     log_request("GET", "/v1/models")
 
     if not verify_auth(request):
         return JSONResponse(status_code=401, content={"error": {"message": "Invalid API key"}})
 
     models_data = []
-    for m in CLAUDE_MODELS:
+    seen_ids = set()
+    for m_id, m in MODEL_REGISTRY.items():
+        if m_id in seen_ids:
+            continue
+        seen_ids.add(m_id)
         models_data.append({
             "id": m["id"],
             "object": "model",
@@ -724,7 +765,7 @@ async def list_models(request: Request):
             "type": "model",
         })
 
-    log_proxy("out", f"Returning {len(models_data)} Claude model(s)")
+    log_proxy("out", f"Returning {len(models_data)} model option(s) to Claude Desktop")
     return JSONResponse(content={"data": models_data, "object": "list"})
 
 
@@ -736,7 +777,7 @@ async def list_models(request: Request):
 async def create_message(request: Request):
     """
     Receive Anthropic Messages API request from Claude Desktop/Code,
-    translate and forward to the configured backend provider.
+    translate and forward to the selected backend provider.
     """
     # Auth check
     if not verify_auth(request):
@@ -765,17 +806,21 @@ async def create_message(request: Request):
             },
         )
 
-    requested_model = body.get("model", DEFAULT_RESPONSE_MODEL)
+    requested_model = body.get("model", DEFAULT_MODEL_ID)
     is_streaming = body.get("stream", False)
+
+    # Resolve provider config for requested model
+    provider_cfg = MODEL_REGISTRY.get(requested_model)
+    if not provider_cfg:
+        provider_cfg = MODEL_REGISTRY[DEFAULT_MODEL_ID]
+        log_info(f"Requested model '{requested_model}' not found, defaulting to '{DEFAULT_MODEL_ID}' ({provider_cfg['model']})")
 
     log_request(
         "POST", "/v1/messages",
-        f"model={requested_model}  stream={is_streaming}  max_tokens={body.get('max_tokens', '?')}"
+        f"model={requested_model} -> profile={provider_cfg['id']} ({provider_cfg['model']})  stream={is_streaming}  max_tokens={body.get('max_tokens', '?')}"
     )
 
     # ── Intercept Claude Desktop 'Test Connection' ──
-    # Claude Desktop sends a max_tokens=1, stream=False request to test the connection.
-    # On slow backends (like GLM-5.3 cold start), this non-streaming test times out.
     if not is_streaming and body.get("max_tokens") == 1:
         log_proxy("in", f"← Intercepted Claude 'Test connection' probe. Returning mock success.")
         return JSONResponse(content={
@@ -790,14 +835,12 @@ async def create_message(request: Request):
         })
 
     # ── Route based on provider type ──
-    provider_type = PROVIDER["type"].lower()
+    provider_type = provider_cfg["type"].lower()
 
     if provider_type == "anthropic":
-        # Passthrough — forward as-is to Anthropic-compatible backend
-        return await _proxy_anthropic(body, requested_model, is_streaming)
+        return await _proxy_anthropic(body, requested_model, is_streaming, provider_cfg)
     elif provider_type == "openai":
-        # Translate — convert to OpenAI format and back
-        return await _proxy_openai(body, requested_model, is_streaming)
+        return await _proxy_openai(body, requested_model, is_streaming, provider_cfg)
     else:
         log_error(f"Unknown provider type: {provider_type}")
         return JSONResponse(
@@ -816,25 +859,24 @@ async def create_message(request: Request):
 # Proxy: OpenAI-compatible backends
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _proxy_openai(body: dict, requested_model: str, is_streaming: bool):
+async def _proxy_openai(body: dict, requested_model: str, is_streaming: bool, provider_cfg: dict):
     """Translate Anthropic request → OpenAI, forward, translate response back."""
-    openai_body = anthropic_to_openai(body)
+    openai_body = anthropic_to_openai(body, provider_cfg["model"])
 
-    base_url = PROVIDER["base_url"].rstrip("/")
+    base_url = provider_cfg["base_url"].rstrip("/")
     url = f"{base_url}/chat/completions"
 
     headers = {
-        "Authorization": f"Bearer {PROVIDER['api_key']}",
+        "Authorization": f"Bearer {provider_cfg['api_key']}",
         "Content-Type": "application/json",
     }
 
-    log_proxy("out", f"→ {C.BLUE}{PROVIDER['model']}{C.RESET} @ {C.DIM}{base_url}{C.RESET}")
+    log_proxy("out", f"→ {C.BLUE}{provider_cfg['id']}{C.RESET} ({provider_cfg['model']}) @ {C.DIM}{base_url}{C.RESET}")
 
     try:
         if is_streaming:
             # ── Streaming mode ──
             async def generate():
-                # ── MUST send message_start first before any pings! ──
                 message_start = {
                     "type": "message",
                     "id": f"msg_{uuid.uuid4().hex[:24]}",
@@ -861,7 +903,6 @@ async def _proxy_openai(body: dict, requested_model: str, is_streaming: bool):
                 
                 task = asyncio.create_task(http_client.send(req, stream=True))
                 
-                # Keep client alive while waiting for backend (useful for slow cold starts)
                 while not task.done():
                     done, pending = await asyncio.wait([task], timeout=10.0)
                     if not done:
@@ -920,7 +961,7 @@ async def _proxy_openai(body: dict, requested_model: str, is_streaming: bool):
 
     except httpx.ConnectError as e:
         log_error(f"Connection failed: {e}")
-        return _make_anthropic_error(502, f"Cannot connect to backend: {PROVIDER['base_url']}")
+        return _make_anthropic_error(502, f"Cannot connect to backend: {provider_cfg['base_url']}")
     except httpx.ReadTimeout as e:
         log_error(f"Read timeout: {e}")
         return _make_anthropic_error(504, "Backend read timeout")
@@ -933,21 +974,20 @@ async def _proxy_openai(body: dict, requested_model: str, is_streaming: bool):
 # Proxy: Anthropic-compatible backends (passthrough)
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _proxy_anthropic(body: dict, requested_model: str, is_streaming: bool):
+async def _proxy_anthropic(body: dict, requested_model: str, is_streaming: bool, provider_cfg: dict):
     """Forward request as-is to an Anthropic-compatible backend."""
-    base_url = PROVIDER["base_url"].rstrip("/")
+    base_url = provider_cfg["base_url"].rstrip("/")
     url = f"{base_url}/messages"
 
-    # Override model name with configured model
-    body["model"] = PROVIDER["model"]
+    body["model"] = provider_cfg["model"]
 
     headers = {
-        "x-api-key": PROVIDER["api_key"],
+        "x-api-key": provider_cfg["api_key"],
         "anthropic-version": "2023-06-01",
         "Content-Type": "application/json",
     }
 
-    log_proxy("out", f"→ {C.BLUE}{PROVIDER['model']}{C.RESET} @ {C.DIM}{base_url}{C.RESET}  (passthrough)")
+    log_proxy("out", f"→ {C.BLUE}{provider_cfg['id']}{C.RESET} ({provider_cfg['model']}) @ {C.DIM}{base_url}{C.RESET} (passthrough)")
 
     try:
         if is_streaming:
@@ -961,7 +1001,6 @@ async def _proxy_anthropic(body: dict, requested_model: str, is_streaming: bool)
                 
                 task = asyncio.create_task(http_client.send(req, stream=True))
                 
-                # Keep client alive while waiting for backend
                 while not task.done():
                     done, pending = await asyncio.wait([task], timeout=10.0)
                     if not done:
@@ -987,9 +1026,8 @@ async def _proxy_anthropic(body: dict, requested_model: str, is_streaming: bool)
                 log_proxy("in", f"← Streaming passthrough...")
                 try:
                     async for line in response.aiter_lines():
-                        # Rewrite model name in message_start events
-                        if "message_start" in line and PROVIDER["model"] in line:
-                            line = line.replace(PROVIDER["model"], requested_model)
+                        if "message_start" in line and provider_cfg["model"] in line:
+                            line = line.replace(provider_cfg["model"], requested_model)
                         yield line + "\n"
                 finally:
                     await response.aclose()
@@ -1011,7 +1049,6 @@ async def _proxy_anthropic(body: dict, requested_model: str, is_streaming: bool)
                 return _make_anthropic_error(response.status_code, response.text)
 
             result = response.json()
-            # Rewrite model name
             result["model"] = requested_model
             log_proxy("in", f"← {C.GREEN}OK{C.RESET}  (passthrough)")
             return JSONResponse(content=result)
@@ -1062,9 +1099,9 @@ async def health():
     return {
         "status": "ok",
         "service": "Universal LLM Proxy",
-        "provider": PROVIDER["type"],
-        "model": PROVIDER["model"],
-        "base_url": PROVIDER["base_url"],
+        "default_model": DEFAULT_MODEL_ID,
+        "models_count": len(MODEL_REGISTRY),
+        "available_models": list(MODEL_REGISTRY.keys()),
     }
 
 @app.get("/health")
@@ -1079,9 +1116,20 @@ async def health_check():
 if __name__ == "__main__":
     banner()
 
-    log_info(f"Provider:  {C.BOLD}{PROVIDER['type'].upper()}{C.RESET}")
-    log_info(f"Backend:   {C.CYAN}{PROVIDER['base_url']}{C.RESET}")
-    log_info(f"Model:     {C.GREEN}{PROVIDER['model']}{C.RESET}")
+    unique_models = [m for k, m in MODEL_REGISTRY.items() if k not in STANDARD_CLAUDE_IDS]
+    
+    log_info(f"Loaded {C.BOLD}{len(unique_models)}{C.RESET} model(s) from config.yaml:")
+    for m in unique_models:
+        print(f"       • {C.BOLD}{C.GREEN}{m['display_name']}{C.RESET} -> {m['model']} @ {m['base_url']}")
+    
+    print()
+    log_info(f"{C.YELLOW}Claude Desktop UI Mapping (Due to Anthropic's hardcoded UI):{C.RESET}")
+    for cid in STANDARD_CLAUDE_IDS:
+        if cid in MODEL_REGISTRY:
+            mapped_target = MODEL_REGISTRY[cid]
+            print(f"       • UI shows: {C.BOLD}{cid}{C.RESET}  ==> Routes to: {C.CYAN}{mapped_target['display_name']}{C.RESET}")
+
+    print()
     log_info(f"Proxy Key: {C.DIM}{SERVER['api_key'][:10]}...{C.RESET}")
     print()
 
@@ -1114,5 +1162,5 @@ if __name__ == "__main__":
         app,
         host=SERVER["host"],
         port=int(SERVER["port"]),
-        log_level="warning",  # Keep uvicorn quiet — we handle our own logging
+        log_level="warning",
     )

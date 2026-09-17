@@ -1,16 +1,17 @@
 # Universal LLM Proxy for Claude Code & Desktop
 **Developed by Mahesh Kumar Dey** 🚀
 
-This is a powerful, lightweight proxy server that allows you to use **ANY LLM Provider** (OpenAI, NVIDIA NIM, Groq, Together AI, Ollama, etc.) seamlessly within **Claude Desktop** and the **Claude Code CLI**.
+This is a powerful, lightweight proxy server that allows you to use **ANY LLM Provider** (OpenAI, NVIDIA NIM, Google Gemini, Groq, Together AI, Ollama, etc.) seamlessly within **Claude Desktop** and the **Claude Code CLI**.
 
-It acts as a Universal Translator: it accepts Anthropic API requests (including native tool calling, streaming, and vision), translates them to the standard OpenAI API format, fetches the response from your chosen provider, and translates it back to Anthropic's format on-the-fly.
+It acts as a Universal Translator: it accepts Anthropic API requests (including native tool calling, streaming, and vision), translates them to standard OpenAI API format, fetches responses from your chosen provider, and translates them back to Anthropic format on-the-fly.
 
 ## ✨ Features
-- **Universal Compatibility:** Run Claude Code with ANY OpenAI-compatible API endpoint.
-- **Full Tool Calling Support:** Seamlessly translates Claude Code's Anthropic function/tool calls into native OpenAI tool calls (and translates the responses back).
-- **Keep-Alive System:** Prevents Claude Desktop from timing out during slow cold-starts (perfect for heavy models like NVIDIA's GLM-5.3 or Llama 3.1).
-- **Passthrough Mode:** Can also act as a standard Anthropic proxy if you just want to route official Claude traffic.
-- **Developer Crafted:** Built and optimized by Mahesh Kumar Dey for ultimate flexibility and speed.
+- **Multi-Model & Multi-Provider:** Configure multiple models (NVIDIA, Gemini, OpenAI, Groq, Ollama) in `config.yaml` and switch between them directly from Claude Desktop's UI dropdown!
+- **Dynamic Routing:** Automatically routes each chat request to the specific provider base URL and API key corresponding to the selected model.
+- **Universal Compatibility:** Run Claude Code CLI with ANY OpenAI-compatible API endpoint.
+- **Full Tool Calling Support:** Seamlessly translates Claude Code's Anthropic function/tool calls into native OpenAI tool calls (and translates responses back).
+- **Keep-Alive System:** Prevents Claude Desktop from timing out during slow cold-starts (perfect for heavy models like NVIDIA GLM-5.3 or Llama 3.1).
+- **Passthrough Mode:** Can also act as a standard Anthropic proxy if you want to route official Claude traffic.
 
 ---
 
@@ -22,17 +23,39 @@ Make sure you have Python installed, then install the required packages:
 pip install -r requirements.txt
 ```
 
-### 2. Configure Your Provider
-Edit `config.yaml` to set your desired LLM API. 
-You can use NVIDIA, Groq, OpenAI, Ollama, or any other provider!
+### 2. Configure Your Models & Providers
+Edit `config.yaml` to set your desired models and API keys. All models configured under `models:` will appear in Claude Desktop's model dropdown menu!
 
 ```yaml
 # config.yaml
-provider:
-  type: "openai"
-  base_url: "https://api.groq.com/openai/v1"
-  api_key: "gsk_your_groq_api_key"
-  model: "llama-3.1-70b-versatile"
+server:
+  host: "127.0.0.1"
+  port: 4000
+  api_key: "sk-proxy-universal-1234"
+
+default_model: "nvidia-glm-5.3-flash"
+
+models:
+  - id: "nvidia-glm-5.3-flash"
+    display_name: "NVIDIA GLM-5.3 Flash"
+    type: "openai"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    api_key: "nvapi-YOUR_KEY"
+    model: "z-ai/glm-5.3-flash"
+
+  - id: "gemini-2.5-flash"
+    display_name: "Google Gemini 2.5 Flash"
+    type: "openai"
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+    api_key: "AIzaSy_YOUR_KEY"
+    model: "gemini-2.5-flash"
+
+  - id: "openai-gpt-4o"
+    display_name: "OpenAI GPT-4o"
+    type: "openai"
+    base_url: "https://api.openai.com/v1"
+    api_key: "sk-YOUR_KEY"
+    model: "gpt-4o"
 ```
 
 ### 3. Start the Server
@@ -47,7 +70,7 @@ python proxy.py
 ---
 
 ## 💻 How to use with Claude Code (CLI)
-You can force Claude Code to use this proxy instead of the official Anthropic servers by setting two environment variables before running it.
+You can force Claude Code to use this proxy instead of official Anthropic servers by setting environment variables:
 
 **For PowerShell:**
 ```powershell
@@ -62,12 +85,11 @@ export ANTHROPIC_BASE_URL="http://127.0.0.1:4000"
 export ANTHROPIC_API_KEY="sk-proxy-universal-1234"
 claude
 ```
-*Note: The API key here is just for local proxy authentication. Your real API key stays safe inside `config.yaml`.*
 
 ---
 
 ## 🖥️ How to use with Claude Desktop
-Open your Claude Desktop configuration file.
+Open your Claude Desktop configuration file:
 - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 - **Mac:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 
@@ -77,13 +99,10 @@ Add the proxy details inside the `"env"` block:
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:4000/v1",
     "ANTHROPIC_API_KEY": "sk-proxy-universal-1234"
-  },
-  "mcpServers": {
-    // your existing MCP servers...
   }
 }
 ```
-*Restart Claude Desktop completely for the changes to take effect.*
+*Restart Claude Desktop completely. All configured models from `config.yaml` will now appear in your Claude Desktop model selector dropdown!*
 
 ---
 **Created with ❤️ by Mahesh Kumar Dey**

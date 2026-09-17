@@ -1,70 +1,39 @@
-# ─────────────────────────────────────────────────────────────────────
-# Universal LLM Proxy Configuration
-# ─────────────────────────────────────────────────────────────────────
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║              Universal LLM Proxy - Example Config                   ║
+# ╚══════════════════════════════════════════════════════════════════════╝
 
-proxy:
+server:
   host: "127.0.0.1"
   port: 4000
-  # API key that Claude Desktop / Claude Code uses to authenticate with this proxy
-  # You can keep this as is, or change it to something secure.
   api_key: "sk-proxy-universal-1234"
 
-# ─────────────────────────────────────────────────────────────────────
-# Provider Configuration
-# ─────────────────────────────────────────────────────────────────────
-# type: "openai"     → For OpenAI-compatible backends (NVIDIA NIM, OpenAI, Groq, Together AI, Ollama, etc.)
-# type: "anthropic"  → For Anthropic-compatible backends (pass-through)
-#
-# Just change base_url, api_key, and model to switch providers!
+default_model: "nvidia-glm-5.3-flash"
 
-provider:
-  type: "openai"
-  base_url: "https://integrate.api.nvidia.com/v1"
-  api_key: "YOUR_NVIDIA_API_KEY_HERE"
-  model: "z-ai/glm-5.3"
+models:
+  - id: "nvidia-glm-5.3-flash"
+    display_name: "NVIDIA GLM-5.3 Flash"
+    type: "openai"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    api_key: "YOUR_NVIDIA_API_KEY_HERE"
+    model: "z-ai/glm-5.3-flash"
 
-# ─────────────────────────────────────────────────────────────────────
-# Example Configurations (uncomment one to use)
-# ─────────────────────────────────────────────────────────────────────
+  - id: "gemini-2.5-flash"
+    display_name: "Google Gemini 2.5 Flash"
+    type: "openai"
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+    api_key: "YOUR_GEMINI_API_KEY_HERE"
+    model: "gemini-2.5-flash"
 
-# ── NVIDIA NIM (GLM-5.3) ──
-# provider:
-#   type: "openai"
-#   base_url: "https://integrate.api.nvidia.com/v1"
-#   api_key: "YOUR_NVIDIA_API_KEY_HERE"
-#   model: "z-ai/glm-5.3"
+  - id: "openai-gpt-4o"
+    display_name: "OpenAI GPT-4o"
+    type: "openai"
+    base_url: "https://api.openai.com/v1"
+    api_key: "YOUR_OPENAI_API_KEY_HERE"
+    model: "gpt-4o"
 
-# ── OpenAI (GPT-4o) ──
-# provider:
-#   type: "openai"
-#   base_url: "https://api.openai.com/v1"
-#   api_key: "YOUR_OPENAI_API_KEY_HERE"
-#   model: "gpt-4o"
-
-# ── Groq (Llama 3.1 70B) ──
-# provider:
-#   type: "openai"
-#   base_url: "https://api.groq.com/openai/v1"
-#   api_key: "YOUR_GROQ_API_KEY_HERE"
-#   model: "llama-3.1-70b-versatile"
-
-# ── Ollama (Local) ──
-# provider:
-#   type: "openai"
-#   base_url: "http://localhost:11434/v1"
-#   api_key: "ollama"
-#   model: "llama3"
-
-# ── DeepSeek ──
-# provider:
-#   type: "openai"
-#   base_url: "https://api.deepseek.com/v1"
-#   api_key: "YOUR_DEEPSEEK_API_KEY_HERE"
-#   model: "deepseek-chat"
-
-# ── Gemini ──
-# provider:
-#   type: "openai"
-#   base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
-#   api_key: "YOUR_GEMINI_API_KEY_HERE"
-#   model: "gemini-1.5-pro"
+  - id: "groq-llama-3.1-70b"
+    display_name: "Groq Llama 3.1 70B"
+    type: "openai"
+    base_url: "https://api.groq.com/openai/v1"
+    api_key: "YOUR_GROQ_API_KEY_HERE"
+    model: "llama-3.1-70b-versatile"
