@@ -96,21 +96,7 @@ def log_proxy(direction: str, msg: str):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
-# Claude Desktop UI is hardcoded to only accept and display these specific IDs.
-# We map configured models to these standard IDs so they appear in the app's dropdown.
-STANDARD_CLAUDE_IDS = [
-    "claude-3-7-sonnet-20250219",
-    "claude-3-5-sonnet-20241022",
-    "claude-3-5-haiku-20241022",
-    "claude-3-opus-20240229",
-    "claude-sonnet-4-20250514",
-    "claude-opus-4-20250918",
-    "claude-3-sonnet-20240229",
-    "claude-3-haiku-20240307",
-    "claude-2.1",
-    "claude-2.0",
-    "claude-instant-1.2"
-]
+
 
 def load_config() -> tuple[dict, dict, str]:
     """Load configuration from config.yaml."""
@@ -169,10 +155,23 @@ def load_config() -> tuple[dict, dict, str]:
             "model": original_model,
         }
 
+    STANDARD_CLAUDE_IDS = [
+        "claude-3-7-sonnet-20250219",
+        "claude-3-5-sonnet-20241022",
+        "claude-3-5-haiku-20241022",
+        "claude-3-opus-20240229",
+        "claude-sonnet-4-20250514",
+        "claude-opus-4-20250918",
+        "claude-3-sonnet-20240229",
+        "claude-3-haiku-20240307",
+        "claude-2.1",
+        "claude-2.0",
+        "claude-instant-1.2"
+    ]
+
     parsed_models = list(model_registry.values())
     
-    # Create the mapping for standard IDs so Claude Desktop works.
-    # We only map as many standard IDs as there are custom models.
+    # We MUST map to standard IDs because Claude Desktop rejects custom IDs and falls back to defaults.
     for idx, target in enumerate(parsed_models):
         if idx >= len(STANDARD_CLAUDE_IDS):
             log_warn(f"Cannot map '{target['display_name']}' to UI. Max {len(STANDARD_CLAUDE_IDS)} UI models supported.")
@@ -188,6 +187,8 @@ def load_config() -> tuple[dict, dict, str]:
                 "api_key": target["api_key"],
                 "model": target["model"],
             }
+            # Add a flag to identify this as a mapped standard ID
+            model_registry[cid]["is_standard_mapping"] = True
 
     default_model_id = raw_config.get("default_model")
     if not default_model_id or default_model_id not in model_registry:
@@ -753,6 +754,11 @@ async def list_models(request: Request):
     models_data = []
     seen_ids = set()
     for m_id, m in MODEL_REGISTRY.items():
+        # Only send the mapped standard IDs to Claude Desktop UI. 
+        # Sending custom IDs causes duplicates or gets rejected.
+        if not m.get("is_standard_mapping"):
+            continue
+            
         if m_id in seen_ids:
             continue
         seen_ids.add(m_id)
@@ -1116,18 +1122,17 @@ async def health_check():
 if __name__ == "__main__":
     banner()
 
-    unique_models = [m for k, m in MODEL_REGISTRY.items() if k not in STANDARD_CLAUDE_IDS]
+    unique_models = [m for m in MODEL_REGISTRY.values() if not m.get("is_standard_mapping")]
     
     log_info(f"Loaded {C.BOLD}{len(unique_models)}{C.RESET} model(s) from config.yaml:")
     for m in unique_models:
         print(f"       • {C.BOLD}{C.GREEN}{m['display_name']}{C.RESET} -> {m['model']} @ {m['base_url']}")
-    
+        
     print()
     log_info(f"{C.YELLOW}Claude Desktop UI Mapping (Due to Anthropic's hardcoded UI):{C.RESET}")
-    for cid in STANDARD_CLAUDE_IDS:
-        if cid in MODEL_REGISTRY:
-            mapped_target = MODEL_REGISTRY[cid]
-            print(f"       • UI shows: {C.BOLD}{cid}{C.RESET}  ==> Routes to: {C.CYAN}{mapped_target['display_name']}{C.RESET}")
+    for cid, m in MODEL_REGISTRY.items():
+        if m.get("is_standard_mapping"):
+            print(f"       • UI shows: {C.BOLD}{cid}{C.RESET}  ==> Routes to: {C.CYAN}{m['display_name']}{C.RESET}")
 
     print()
     log_info(f"Proxy Key: {C.DIM}{SERVER['api_key'][:10]}...{C.RESET}")
