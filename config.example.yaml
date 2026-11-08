@@ -6,6 +6,8 @@ server:
   host: "127.0.0.1"
   port: 4000
   api_key: "sk-proxy-universal-1234"
+  # Global token budget per response (Token-based Auto-Continuation)
+  max_total_tokens: 100000
 
 default_model: "nvidia-glm-5.3-flash"
 
@@ -16,6 +18,8 @@ models:
     base_url: "https://integrate.api.nvidia.com/v1"
     api_key: "YOUR_NVIDIA_API_KEY_HERE"
     model: "z-ai/glm-5.3-flash"
+    max_tokens: 8192
+    enable_thinking: false
 
   - id: "gemini-2.5-flash"
     display_name: "Google Gemini 2.5 Flash"

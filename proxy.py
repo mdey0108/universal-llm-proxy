@@ -11,6 +11,7 @@
 """
 
 import asyncio
+import copy
 import json
 import time
 import uuid
@@ -153,6 +154,8 @@ def load_config() -> tuple[dict, dict, str]:
             "base_url": m.get("base_url", ""),
             "api_key": m.get("api_key", ""),
             "model": original_model,
+            "max_tokens": m.get("max_tokens"),
+            "enable_thinking": m.get("enable_thinking"),
         }
 
     STANDARD_CLAUDE_IDS = [
@@ -186,6 +189,8 @@ def load_config() -> tuple[dict, dict, str]:
                 "base_url": target["base_url"],
                 "api_key": target["api_key"],
                 "model": target["model"],
+                "max_tokens": target.get("max_tokens"),
+                "enable_thinking": target.get("enable_thinking"),
             }
             # Add a flag to identify this as a mapped standard ID
             model_registry[cid]["is_standard_mapping"] = True
@@ -224,34 +229,16 @@ def _extract_text_from_content(content) -> str:
     return str(content)
 
 
-def anthropic_to_openai(body: dict, target_model: str) -> dict:
+def anthropic_to_openai(body: dict, target_model_or_cfg: str | dict) -> dict:
     """
     Convert an Anthropic Messages API request to an OpenAI Chat Completions request.
-
-    Anthropic format:
-    {
-        "model": "claude-...",
-        "max_tokens": 1024,
-        "system": "You are helpful",
-        "messages": [{"role": "user", "content": "Hello"}],
-        "stream": true,
-        "temperature": 0.7,
-        "top_p": 1.0
-    }
-
-    OpenAI format:
-    {
-        "model": "gpt-4o",
-        "max_tokens": 1024,
-        "messages": [
-            {"role": "system", "content": "You are helpful"},
-            {"role": "user", "content": "Hello"}
-        ],
-        "stream": true,
-        "temperature": 0.7,
-        "top_p": 1.0
-    }
     """
+    if isinstance(target_model_or_cfg, dict):
+        provider_cfg = target_model_or_cfg
+        target_model = provider_cfg.get("model", "")
+    else:
+        provider_cfg = {}
+        target_model = str(target_model_or_cfg)
     openai_messages = []
 
     # Handle system prompt — Anthropic has it as top-level, OpenAI as a message
@@ -399,8 +386,16 @@ def anthropic_to_openai(body: dict, target_model: str) -> dict:
             }
 
     # Map parameters
-    if "max_tokens" in body:
-        openai_body["max_tokens"] = body["max_tokens"]
+    req_max_tokens = body.get("max_tokens")
+    cfg_max_tokens = provider_cfg.get("max_tokens")
+
+    if cfg_max_tokens:
+        openai_body["max_tokens"] = int(cfg_max_tokens)
+    elif req_max_tokens:
+        openai_body["max_tokens"] = int(req_max_tokens)
+    else:
+        openai_body["max_tokens"] = 4096
+
     if "temperature" in body:
         openai_body["temperature"] = body["temperature"]
     if "top_p" in body:
@@ -411,6 +406,13 @@ def anthropic_to_openai(body: dict, target_model: str) -> dict:
         openai_body["stream"] = True
         # Request usage in stream for token counting
         openai_body["stream_options"] = {"include_usage": True}
+
+    # Thinking / reasoning control (prevents reasoning models like Nemotron from consuming all tokens on chain-of-thought)
+    enable_thinking = provider_cfg.get("enable_thinking")
+    if enable_thinking is not None:
+        openai_body["chat_template_kwargs"] = {"enable_thinking": bool(enable_thinking)}
+    elif "nemotron" in target_model.lower():
+        openai_body["chat_template_kwargs"] = {"enable_thinking": False}
 
     return openai_body
 
@@ -423,7 +425,7 @@ def _map_finish_reason(reason: str | None) -> str:
     """Map OpenAI finish_reason to Anthropic stop_reason."""
     mapping = {
         "stop": "end_turn",
-        "length": "max_tokens",
+        "length": "end_turn",  # Map length to end_turn to prevent Claude Desktop 'output limit exceeded' error
         "content_filter": "end_turn",
         "tool_calls": "tool_use",
         "function_call": "tool_use",
@@ -501,55 +503,29 @@ def openai_to_anthropic(openai_response: dict, requested_model: str) -> dict:
 async def stream_openai_to_anthropic(
     openai_stream: AsyncGenerator,
     requested_model: str,
+    state: dict,
 ) -> AsyncGenerator[str, None]:
     """
     Translate an OpenAI streaming response into Anthropic SSE events.
-
-    OpenAI SSE format:
-        data: {"choices": [{"delta": {"content": "Hello"}}]}
-        data: [DONE]
-
-    Anthropic SSE format:
-        event: message_start
-        data: {"type": "message_start", "message": {...}}
-
-        event: content_block_start
-        data: {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
-
-        event: content_block_delta
-        data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hello"}}
-
-        event: content_block_stop
-        data: {"type": "content_block_stop", "index": 0}
-
-        event: message_delta
-        data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 5}}
-
-        event: message_stop
-        data: {"type": "message_stop"}
+    Yields content_block_delta chunks and tracks output text/finish_reason in state.
     """
-
-    # Track state
     output_tokens = 0
     input_tokens = 0
     finish_reason = None
-    has_content = False
     
-    is_text_block_open = True
+    is_text_block_open = state.get("is_text_block_open", True)
     active_tool_calls = set()
 
-    # 4. Process OpenAI stream chunks
+    # Process OpenAI stream chunks
     async for chunk_data in openai_stream:
         if not chunk_data:
             continue
 
-        # Parse OpenAI chunk
         try:
             chunk = json.loads(chunk_data)
         except json.JSONDecodeError:
             continue
 
-        # Extract usage from the final chunk (if stream_options.include_usage was set)
         if chunk.get("usage"):
             usage = chunk["usage"]
             input_tokens = usage.get("prompt_tokens", 0)
@@ -570,11 +546,10 @@ async def stream_openai_to_anthropic(
 
         if content:
             if not is_text_block_open:
-                # Edge case: text after tool calls. Unlikely in OpenAI, but just ignore or handle.
                 pass
             else:
-                has_content = True
-                output_tokens += 1  # Rough approximation
+                output_tokens += 1
+                state["round_text"] += content
                 delta_event = {
                     "type": "content_block_delta",
                     "index": 0,
@@ -588,18 +563,17 @@ async def stream_openai_to_anthropic(
         # --- Handle Tool Calls ---
         tool_calls = delta.get("tool_calls")
         if tool_calls:
+            state["has_tool_calls"] = True
             if is_text_block_open:
-                # Close the text block
                 yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
                 is_text_block_open = False
+                state["is_text_block_open"] = False
                 
             for tc in tool_calls:
                 idx = tc.get("index", 0)
-                anthropic_idx = idx + 1  # offset by 1 because text is 0
+                anthropic_idx = idx + 1
 
-                # If this is the start of a new tool call
                 if tc.get("id"):
-                    # If we are starting a new one, and there was a previous one, close the previous one
                     if anthropic_idx - 1 in active_tool_calls:
                         yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': anthropic_idx - 1})}\n\n"
                         active_tool_calls.remove(anthropic_idx - 1)
@@ -616,7 +590,6 @@ async def stream_openai_to_anthropic(
                     yield f"event: content_block_start\ndata: {json.dumps(start_block)}\n\n"
                     active_tool_calls.add(anthropic_idx)
 
-                # If there are arguments streaming
                 args = tc.get("function", {}).get("arguments")
                 if args:
                     delta_event = {
@@ -633,36 +606,14 @@ async def stream_openai_to_anthropic(
         if fr:
             finish_reason = fr
 
-    # 5. Emit remaining content_block_stops
-    if is_text_block_open:
-        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
-        is_text_block_open = False
-        
+    # Close active tool call blocks if any
     for idx in list(active_tool_calls):
         yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': idx})}\n\n"
         active_tool_calls.remove(idx)
 
-    # 6. Emit message_delta
-    # Map finish_reason properly (tool_calls -> tool_use)
-    if finish_reason == "tool_calls":
-        anthropic_stop_reason = "tool_use"
-    else:
-        anthropic_stop_reason = _map_finish_reason(finish_reason)
-        
-    message_delta = {
-        "type": "message_delta",
-        "delta": {
-            "stop_reason": anthropic_stop_reason,
-            "stop_sequence": None,
-        },
-        "usage": {
-            "output_tokens": output_tokens,
-        },
-    }
-    yield f"event: message_delta\ndata: {json.dumps(message_delta)}\n\n"
-
-    # 7. Emit message_stop
-    yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
+    state["finish_reason"] = finish_reason
+    state["tokens"] = output_tokens
+    state["is_text_block_open"] = is_text_block_open
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -866,8 +817,8 @@ async def create_message(request: Request):
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _proxy_openai(body: dict, requested_model: str, is_streaming: bool, provider_cfg: dict):
-    """Translate Anthropic request → OpenAI, forward, translate response back."""
-    openai_body = anthropic_to_openai(body, provider_cfg["model"])
+    """Translate Anthropic request → OpenAI, forward with Auto-Continuation, translate response back."""
+    openai_body = anthropic_to_openai(body, provider_cfg)
 
     base_url = provider_cfg["base_url"].rstrip("/")
     url = f"{base_url}/chat/completions"
@@ -879,10 +830,14 @@ async def _proxy_openai(body: dict, requested_model: str, is_streaming: bool, pr
 
     log_proxy("out", f"→ {C.BLUE}{provider_cfg['id']}{C.RESET} ({provider_cfg['model']}) @ {C.DIM}{base_url}{C.RESET}")
 
+    max_total_tokens = int(SERVER.get("max_total_tokens", 100000))
+    SAFETY_MAX_ROUNDS = 50  # Safety guard against infinite loops
+
     try:
         if is_streaming:
-            # ── Streaming mode ──
+            # ── Streaming mode with Auto-Continuation ──
             async def generate():
+                # 1. Start message
                 message_start = {
                     "type": "message",
                     "id": f"msg_{uuid.uuid4().hex[:24]}",
@@ -895,49 +850,117 @@ async def _proxy_openai(body: dict, requested_model: str, is_streaming: bool, pr
                 }
                 yield f"event: message_start\ndata: {json.dumps({'type': 'message_start', 'message': message_start})}\n\n"
                 
+                # 2. Start text content block
                 content_block_start = {
                     "type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}
                 }
                 yield f"event: content_block_start\ndata: {json.dumps(content_block_start)}\n\n"
 
-                req = http_client.build_request(
-                    "POST", url,
-                    headers=headers,
-                    json=openai_body,
-                    timeout=httpx.Timeout(300.0, connect=30.0)
-                )
-                
-                task = asyncio.create_task(http_client.send(req, stream=True))
-                
-                while not task.done():
-                    done, pending = await asyncio.wait([task], timeout=10.0)
-                    if not done:
-                        yield 'event: ping\ndata: {"type": "ping"}\n\n'
-                
-                try:
-                    response = task.result()
-                except Exception as e:
-                    log_error(f"Backend connection error: {e}")
-                    error_json = json.dumps({"type": "error", "error": {"type": "api_error", "message": f"Backend error: {str(e)}"}})
-                    yield f'event: error\ndata: {error_json}\n\n'
-                    return
+                continuation_count = 0
+                total_output_tokens = 0
+                current_body = copy.deepcopy(openai_body)
+                final_finish_reason = "stop"
+                is_text_block_open = True
+                has_tool_calls = False
 
-                if response.status_code != 200:
-                    error_body = await response.aread()
-                    await response.aclose()
-                    error_text = error_body.decode("utf-8", errors="replace")
-                    log_error(f"Backend error {response.status_code}: {error_text[:200]}")
-                    error_json = json.dumps({"type": "error", "error": {"type": "api_error", "message": f"Backend error {response.status_code}: {error_text[:200]}"}})
-                    yield f'event: error\ndata: {error_json}\n\n'
-                    return
+                while True:
+                    req = http_client.build_request(
+                        "POST", url,
+                        headers=headers,
+                        json=current_body,
+                        timeout=httpx.Timeout(300.0, connect=30.0)
+                    )
+                    
+                    task = asyncio.create_task(http_client.send(req, stream=True))
+                    
+                    while not task.done():
+                        done, pending = await asyncio.wait([task], timeout=10.0)
+                        if not done:
+                            yield 'event: ping\ndata: {"type": "ping"}\n\n'
+                    
+                    try:
+                        response = task.result()
+                    except Exception as e:
+                        log_error(f"Backend connection error: {e}")
+                        error_json = json.dumps({"type": "error", "error": {"type": "api_error", "message": f"Backend error: {str(e)}"}})
+                        yield f'event: error\ndata: {error_json}\n\n'
+                        return
 
-                log_proxy("in", f"← Streaming response from backend...")
-                try:
-                    openai_sse = read_openai_sse(response)
-                    async for event in stream_openai_to_anthropic(openai_sse, requested_model):
-                        yield event
-                finally:
-                    await response.aclose()
+                    if response.status_code != 200:
+                        error_body = await response.aread()
+                        await response.aclose()
+                        error_text = error_body.decode("utf-8", errors="replace")
+                        log_error(f"Backend error {response.status_code}: {error_text[:200]}")
+                        error_json = json.dumps({"type": "error", "error": {"type": "api_error", "message": f"Backend error {response.status_code}: {error_text[:200]}"}})
+                        yield f'event: error\ndata: {error_json}\n\n'
+                        return
+
+                    if continuation_count == 0:
+                        log_proxy("in", f"← Streaming response from backend...")
+                    else:
+                        log_proxy("in", f"← Auto-continuing stream (segment {continuation_count + 1})...")
+
+                    state = {
+                        "finish_reason": None,
+                        "round_text": "",
+                        "tokens": 0,
+                        "has_tool_calls": False,
+                        "is_text_block_open": is_text_block_open
+                    }
+
+                    try:
+                        openai_sse = read_openai_sse(response)
+                        async for event in stream_openai_to_anthropic(openai_sse, requested_model, state):
+                            yield event
+                    finally:
+                        await response.aclose()
+
+                    is_text_block_open = state.get("is_text_block_open", True)
+                    total_output_tokens += state.get("tokens", 0)
+                    round_finish_reason = state.get("finish_reason") or "stop"
+                    final_finish_reason = round_finish_reason
+                    has_tool_calls = has_tool_calls or state.get("has_tool_calls", False)
+                    round_text = state.get("round_text", "")
+
+                    # Check if token limit was hit and we should auto-continue
+                    if round_finish_reason == "length" and total_output_tokens < max_total_tokens and continuation_count < SAFETY_MAX_ROUNDS and not state.get("has_tool_calls"):
+                        continuation_count += 1
+                        log_warn(f"Response hit segment limit ({total_output_tokens}/{max_total_tokens} tokens). Auto-continuing seamlessly (segment {continuation_count + 1})...")
+
+                        # Append previous output and continuation prompt
+                        current_body["messages"].append({"role": "assistant", "content": round_text})
+                        current_body["messages"].append({
+                            "role": "user",
+                            "content": "Continue generating the exact remaining text/code from where the previous response was cut off. Do not repeat any part of the text or code already written, not even the current line. Output only the remaining continuation without conversational filler."
+                        })
+
+                        # Turn off thinking for continuation segment to preserve token quota for content
+                        if "chat_template_kwargs" in current_body:
+                            current_body["chat_template_kwargs"]["enable_thinking"] = False
+
+                        continue
+                    else:
+                        break
+
+                # Close text block if still open
+                if is_text_block_open:
+                    yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
+                    is_text_block_open = False
+
+                anthropic_stop_reason = "tool_use" if has_tool_calls else _map_finish_reason(final_finish_reason)
+
+                message_delta = {
+                    "type": "message_delta",
+                    "delta": {
+                        "stop_reason": anthropic_stop_reason,
+                        "stop_sequence": None,
+                    },
+                    "usage": {
+                        "output_tokens": total_output_tokens,
+                    },
+                }
+                yield f"event: message_delta\ndata: {json.dumps(message_delta)}\n\n"
+                yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
 
             return StreamingResponse(
                 generate(),
@@ -950,19 +973,61 @@ async def _proxy_openai(body: dict, requested_model: str, is_streaming: bool, pr
             )
 
         else:
-            # ── Non-streaming mode ──
-            response = await http_client.post(url, headers=headers, json=openai_body)
+            # ── Non-streaming mode with Auto-Continuation ──
+            accumulated_content = ""
+            total_input_tokens = 0
+            total_output_tokens = 0
+            continuation_count = 0
+            current_body = copy.deepcopy(openai_body)
+            last_openai_response = None
+            final_finish_reason = "stop"
 
-            if response.status_code != 200:
-                error_text = response.text
-                log_error(f"Backend error {response.status_code}: {error_text[:200]}")
-                return _make_anthropic_error(response.status_code, error_text)
+            while True:
+                response = await http_client.post(url, headers=headers, json=current_body)
 
-            openai_response = response.json()
-            anthropic_response = openai_to_anthropic(openai_response, requested_model)
+                if response.status_code != 200:
+                    error_text = response.text
+                    log_error(f"Backend error {response.status_code}: {error_text[:200]}")
+                    return _make_anthropic_error(response.status_code, error_text)
 
+                last_openai_response = response.json()
+                choice = last_openai_response.get("choices", [{}])[0]
+                message = choice.get("message", {})
+                new_text = message.get("content", "") or ""
+                accumulated_content += new_text
+
+                usage = last_openai_response.get("usage", {})
+                total_input_tokens += usage.get("prompt_tokens", 0)
+                total_output_tokens += usage.get("completion_tokens", 0)
+
+                finish_reason = choice.get("finish_reason") or "stop"
+                final_finish_reason = finish_reason
+
+                if finish_reason == "length" and total_output_tokens < max_total_tokens and continuation_count < SAFETY_MAX_ROUNDS and not message.get("tool_calls"):
+                    continuation_count += 1
+                    log_warn(f"Response hit segment limit ({total_output_tokens}/{max_total_tokens} tokens). Auto-continuing (segment {continuation_count + 1})...")
+                    current_body["messages"].append({"role": "assistant", "content": new_text})
+                    current_body["messages"].append({
+                        "role": "user",
+                        "content": "Continue generating the exact remaining text/code from where the previous response was cut off. Do not repeat any part of the text or code already written. Output only the remaining continuation without conversational filler."
+                    })
+                    if "chat_template_kwargs" in current_body:
+                        current_body["chat_template_kwargs"]["enable_thinking"] = False
+                    continue
+                else:
+                    break
+
+            # Stitch accumulated text into final response
+            last_openai_response["choices"][0]["message"]["content"] = accumulated_content
+            last_openai_response["choices"][0]["finish_reason"] = final_finish_reason
+            last_openai_response["usage"] = {
+                "prompt_tokens": total_input_tokens,
+                "completion_tokens": total_output_tokens,
+                "total_tokens": total_input_tokens + total_output_tokens,
+            }
+
+            anthropic_response = openai_to_anthropic(last_openai_response, requested_model)
             log_proxy("in", f"← {C.GREEN}OK{C.RESET}  tokens: in={anthropic_response['usage']['input_tokens']} out={anthropic_response['usage']['output_tokens']}")
-
             return JSONResponse(content=anthropic_response)
 
     except httpx.ConnectError as e:
@@ -1136,6 +1201,7 @@ if __name__ == "__main__":
 
     print()
     log_info(f"Proxy Key: {C.DIM}{SERVER['api_key'][:10]}...{C.RESET}")
+    log_info(f"Auto-Continuation: {C.BOLD}{C.GREEN}Enabled{C.RESET} (Budget: {C.BOLD}{SERVER.get('max_total_tokens', 100000):,}{C.RESET} tokens per response)")
     print()
 
     log_success(f"Proxy starting on {C.BOLD}http://{SERVER['host']}:{SERVER['port']}{C.RESET}")
